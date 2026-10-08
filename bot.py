@@ -22,9 +22,12 @@ DEFAULT_ORIGEN = "Carrer de Bernat Descoll, 63, 46026 València, España"
 def ordenar_por_duracion(duraciones, cantidad):
     if cantidad <= 1:
         return list(range(cantidad))
+    
+    # 1. Construcción inicial por tiempo de conducción (OSRM)
     pendientes = set(range(cantidad))
     orden = []
     nodo_actual = 0
+
     while pendientes:
         candidatos = [i for i in pendientes if duraciones[nodo_actual][i + 1] is not None]
         if not candidatos:
@@ -34,24 +37,32 @@ def ordenar_por_duracion(duraciones, cantidad):
         pendientes.remove(siguiente)
         nodo_actual = siguiente + 1
 
-    # Bucle 2-Opt
-    def t(a, b): return duraciones[a][b] or float("inf")
+    # 2. Bucle 2-Opt intensivo para eliminar vaivenes de autovía (como el de Paterna)
+    def t(a, b): 
+        val = duraciones[a][b]
+        return val if val is not None else float("inf")
+
     for _ in range(300):
         mejoro = False
         for i in range(0, len(orden) - 1):
-            a = 0 if i == 0 else orden[i - 1] + 1
-            b = orden[i] + 1
+            nodo_a = 0 if i == 0 else orden[i - 1] + 1
+            nodo_b = orden[i] + 1
             for j in range(i + 1, len(orden)):
-                c = orden[j] + 1
-                d = orden[j + 1] + 1 if j + 1 < len(orden) else None
-                actual = t(a, b) + (t(c, d) if d else 0)
-                nuevo = t(a, c) + (t(b, d) if d else 0)
+                nodo_c = orden[j] + 1
+                nodo_d = orden[j + 1] + 1 if j + 1 < len(orden) else None
+
+                actual = t(nodo_a, nodo_b) + (t(nodo_c, nodo_d) if nodo_d else 0)
+                nuevo = t(nodo_a, nodo_c) + (t(nodo_b, nodo_d) if nodo_d else 0)
+
                 if nuevo + 1 < actual:
                     orden[i:j + 1] = reversed(orden[i:j + 1])
                     mejoro = True
                     break
-            if mejoro: break
-        if not mejoro: break
+            if mejoro:
+                break
+        if not mejoro:
+            break
+
     return orden
 
 def generar_gpx(puntos_ordenados, origen_texto):
