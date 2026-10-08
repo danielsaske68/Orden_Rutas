@@ -2,6 +2,8 @@ import os
 import logging
 import urllib.parse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from ortools.constraint_solver import routing_enums_pb2
+from ortools.constraint_solver import pywrapcp
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, 
     CallbackQueryHandler, ContextTypes, filters
@@ -20,48 +22,54 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DEFAULT_ORIGEN = "Carrer de Bernat Descoll, 63, 46026 València, España"
 
 def ordenar_por_duracion(duraciones, cantidad):
+    """
+    Resuelve el problema de rutas (TSP) de forma matemática usando Google OR-Tools.
+    Garantiza el recorrido óptimo en carretera fija desde la salida (nodo 0).
+    """
     if cantidad <= 1:
         return list(range(cantidad))
-    
-    # 1. Construcción inicial por tiempo de conducción (OSRM)
-    pendientes = set(range(cantidad))
+
+    # OR-Tools requiere enteros para la matriz de costes
+    # Convertimos la matriz de segundos a milisegundos
+    matrix = []
+    for fila in duraciones:
+        linea = []
+        for val in fila:
+            linea.append(int(val * 1000) if val is not None else 99999999)
+        matrix.append(linea)
+
+    # Crear el modelo de ruteo
+    manager = pywrapcp.RoutingIndexManager(len(matrix), 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
+
+    def distance_callback(from_index, to_index):
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return matrix[from_node][to_node]
+
+    transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+
+    # Parámetros de búsqueda (Path Cheapest Arc / Guided Local Search)
+    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+    search_parameters.first_solution_strategy = (
+        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    )
+
+    solution = routing.SolveWithParameters(search_parameters)
+
+    if not solution:
+        # Fallback de seguridad si no encuentra solución
+        return list(range(cantidad))
+
+    # Extraer el orden omitiendo el origen (nodo 0)
+    index = routing.Start(0)
     orden = []
-    nodo_actual = 0
-
-    while pendientes:
-        candidatos = [i for i in pendientes if duraciones[nodo_actual][i + 1] is not None]
-        if not candidatos:
-            break
-        siguiente = min(candidatos, key=lambda i: duraciones[nodo_actual][i + 1])
-        orden.append(siguiente)
-        pendientes.remove(siguiente)
-        nodo_actual = siguiente + 1
-
-    # 2. Bucle 2-Opt intensivo para eliminar vaivenes de autovía (como el de Paterna)
-    def t(a, b): 
-        val = duraciones[a][b]
-        return val if val is not None else float("inf")
-
-    for _ in range(300):
-        mejoro = False
-        for i in range(0, len(orden) - 1):
-            nodo_a = 0 if i == 0 else orden[i - 1] + 1
-            nodo_b = orden[i] + 1
-            for j in range(i + 1, len(orden)):
-                nodo_c = orden[j] + 1
-                nodo_d = orden[j + 1] + 1 if j + 1 < len(orden) else None
-
-                actual = t(nodo_a, nodo_b) + (t(nodo_c, nodo_d) if nodo_d else 0)
-                nuevo = t(nodo_a, nodo_c) + (t(nodo_b, nodo_d) if nodo_d else 0)
-
-                if nuevo + 1 < actual:
-                    orden[i:j + 1] = reversed(orden[i:j + 1])
-                    mejoro = True
-                    break
-            if mejoro:
-                break
-        if not mejoro:
-            break
+    while not routing.IsEnd(index):
+        nodo = manager.IndexToNode(index)
+        if nodo != 0:
+            orden.append(nodo - 1)  # Convertir a índice de servicios (0..N-1)
+        index = solution.Value(routing.NextVar(index))
 
     return orden
 
