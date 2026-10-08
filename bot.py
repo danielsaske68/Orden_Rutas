@@ -78,13 +78,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Para cambiar la dirección de salida pulsa el botón de abajo o usa /origen."
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📍 Cambiar Punto de Salida", callback_query_handler_data="cambiar_origen")]
+    [InlineKeyboardButton("📍 Cambiar Punto de Salida", callback_data="cambiar_origen")] 
     ])
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=keyboard)
 
 async def cambiar_origen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["esperando_origen"] = True
     await update.message.reply_text("✏️ *Escribe la nueva dirección de salida:*", parse_mode="Markdown")
+
+async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "cambiar_origen":
+        context.user_data["esperando_origen"] = True
+        await query.message.reply_text("✏️ *Escribe la nueva dirección de salida:*", parse_mode="Markdown")
 
 async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
@@ -168,5 +175,6 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("origen", cambiar_origen_cmd))
+    app.add_handler(CallbackQueryHandler(boton_callback))  # <-- Añadir esta línea
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje))
     app.run_polling()
