@@ -108,27 +108,90 @@ def generar_gpx(puntos_ordenados, origen_texto):
     return "\n".join(gpx)
 
 
+def menu_principal():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🗺️ Rutas", callback_data="menu_rutas"),
+            InlineKeyboardButton("💰 Presupuesto", callback_data="menu_presupuesto"),
+        ],
+        [
+            InlineKeyboardButton("📍 Cambiar origen", callback_data="cambiar_origen")
+        ],
+    ])
+
+
+def menu_secundario():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🏠 Menú principal", callback_data="menu_inicio"),
+            InlineKeyboardButton("📍 Cambiar origen", callback_data="cambiar_origen"),
+        ]
+    ])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     if "origen" not in user_data:
         user_data["origen"] = DEFAULT_ORIGEN
+    user_data["modo"] = "inicio"
 
     msg = (
-        "🚚 *Bot Optimizador de Rutas de Paquetería*\n\n"
+        "🚚 *Bot Optimizador de Rutas y Presupuestos*\n\n"
         f"📍 *Punto de Salida Actual:* `{user_data['origen']}`\n\n"
-        "👉 *Instrucciones:* Pega directamente aquí el bloque de"
-        " órdenes/servicios (una por línea) y presiona Enviar.\n\n"
-        "Para cambiar la dirección de salida pulsa el botón de abajo o usa"
-        " /origen."
+        "👉 Elige una opción del menú para continuar."
     )
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            "📍 Cambiar Punto de Salida", callback_data="cambiar_origen"
-        )
-    ]])
     await update.message.reply_text(
-        msg, parse_mode="Markdown", reply_markup=keyboard
+        msg, parse_mode="Markdown", reply_markup=menu_principal()
     )
+
+
+async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_data = context.user_data
+
+    if query.data == "menu_inicio":
+        if "origen" not in user_data:
+            user_data["origen"] = DEFAULT_ORIGEN
+        user_data["modo"] = "inicio"
+        await query.edit_message_text(
+            "🚚 *Bot Optimizador de Rutas y Presupuestos*\n\n"
+            f"📍 *Punto de Salida Actual:* `{user_data['origen']}`\n\n"
+            "👉 Elige una opción del menú para continuar.",
+            parse_mode="Markdown",
+            reply_markup=menu_principal(),
+        )
+        return
+
+    if query.data == "menu_rutas":
+        user_data["modo"] = "rutas"
+        await query.edit_message_text(
+            "🗺️ *Modo rutas activado*\n\n"
+            "Pega aquí las direcciones o servicios, una por línea, y te calcularé la ruta más eficiente.\n\n"
+            "También puedes usar /origen para cambiar el punto de salida.",
+            parse_mode="Markdown",
+            reply_markup=menu_secundario(),
+        )
+        return
+
+    if query.data == "menu_presupuesto":
+        user_data["modo"] = "presupuesto"
+        await query.edit_message_text(
+            "💰 *Modo presupuesto activado*\n\n"
+            "Escribe la descripción del trabajo y te devolveré una estimación rápida.\n\n"
+            "Ejemplo: desatasco wc urgente con acceso difícil",
+            parse_mode="Markdown",
+            reply_markup=menu_secundario(),
+        )
+        return
+
+    if query.data == "cambiar_origen":
+        user_data["esperando_origen"] = True
+        await query.edit_message_text(
+            "✏️ *Escribe la nueva dirección de salida:*",
+            parse_mode="Markdown",
+            reply_markup=menu_secundario(),
+        )
 
 
 async def cambiar_origen_cmd(
@@ -140,31 +203,59 @@ async def cambiar_origen_cmd(
     )
 
 
-async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == "cambiar_origen":
-        context.user_data["esperando_origen"] = True
-        await query.message.reply_text(
-            "✏️ *Escribe la nueva dirección de salida:*", parse_mode="Markdown"
-        )
+async def estimar_presupuesto_basico(texto):
+    t = texto.lower()
+    base = 90.0
+
+    if any(k in t for k in ["wc", "vater", "inodoro", "desatasco", "atasco"]):
+        base = 120.0
+    if any(k in t for k in ["llave", "grifo", "latiguillo", "fuga"]):
+        base = 140.0
+    if any(k in t for k in ["tuberia", "cobre", "pex", "multicapa", "tramo"]):
+        base = 180.0
+    if any(k in t for k in ["urgente", "hoy mismo", "fin de semana", "noche"]):
+        base *= 1.2
+    if any(k in t for k in ["acceso dificil", "acceso difícil", "muebles", "pared", "falso techo"]):
+        base *= 1.15
+    if any(k in t for k in ["material", "pieza", "válvula", "brida", "sifon", "racor"]):
+        base *= 1.1
+
+    return {
+        "titulo": "Presupuesto estimado",
+        "descripcion": texto,
+        "precio_min": round(base * 0.9, 2),
+        "precio_recomendado": round(base, 2),
+        "precio_max": round(base * 1.25, 2),
+    }
 
 
 async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     texto = update.message.text.strip()
 
-    # Si estem esperant una nova adreça d'eixida
     if user_data.get("esperando_origen"):
         user_data["origen"] = texto
         user_data["esperando_origen"] = False
         await update.message.reply_text(
             f"✅ *Punto de salida actualizado a:*\n`{texto}`",
             parse_mode="Markdown",
+            reply_markup=menu_principal(),
         )
         return
 
-    # Processament de la llista d'avisos
+    if user_data.get("modo") == "presupuesto":
+        presupuesto = await estimar_presupuesto_basico(texto)
+        await update.message.reply_text(
+            "💰 *Presupuesto estimado*\n\n"
+            f"📝 *Descripción:* {presupuesto['descripcion']}\n"
+            f"💵 *Mínimo:* {presupuesto['precio_min']} €\n"
+            f"✅ *Recomendado:* {presupuesto['precio_recomendado']} €\n"
+            f"💸 *Máximo:* {presupuesto['precio_max']} €",
+            parse_mode="Markdown",
+            reply_markup=menu_secundario(),
+        )
+        return
+
     lineas = [l.strip() for l in texto.splitlines() if l.strip()]
     if not lineas:
         return
@@ -258,12 +349,28 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("origen", cambiar_origen_cmd))
-    app.add_handler(CallbackQueryHandler(boton_callback))
-    app.add_handler(
+def main() -> None:
+    """Inicializa y arranca el bot de Telegram."""
+    if not TOKEN:
+        raise RuntimeError(
+            "Falta la variable de entorno TELEGRAM_TOKEN. "
+            "Configúrela antes de iniciar el bot."
+        )
+
+    application = ApplicationBuilder().token(TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("origen", cambiar_origen_cmd))
+    application.add_handler(
+        CallbackQueryHandler(handle_menu_callback, pattern="menu_|cambiar_origen")
+    )
+    application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje)
     )
-    app.run_polling()
+
+    logging.info("Bot de rutas iniciado en Telegram.")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
