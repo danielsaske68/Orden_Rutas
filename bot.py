@@ -136,6 +136,22 @@ def menu_secundario():
     ])
 
 
+def menu_presupuesto_secundario():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔎 Buscar baremo", callback_data="buscar_baremo"),
+            InlineKeyboardButton("➕ Añadir trabajo", callback_data="agregar_presupuesto"),
+        ],
+        [
+            InlineKeyboardButton("📄 Generar PDF", callback_data="generar_presupuesto"),
+            InlineKeyboardButton("🧹 Borrar lista", callback_data="limpiar_presupuesto"),
+        ],
+        [
+            InlineKeyboardButton("🏠 Menú principal", callback_data="menu_inicio"),
+        ],
+    ])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     if "origen" not in user_data:
@@ -183,12 +199,13 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if query.data == "menu_presupuesto":
         user_data["modo"] = "presupuesto"
+        user_data.setdefault("presupuesto_items", [])
         await query.edit_message_text(
             "💰 *Modo presupuesto activado*\n\n"
-            "Escribe la descripción del trabajo y te devolveré una estimación rápida.\n\n"
-            "Ejemplo: desatasco wc urgente con acceso difícil",
+            "Aquí puedes buscar baremos, añadir trabajos y sumar un presupuesto final antes de exportarlo a PDF.\n\n"
+            "Usa los botones para buscar un baremo o añadir un trabajo al total.",
             parse_mode="Markdown",
-            reply_markup=menu_secundario(),
+            reply_markup=menu_presupuesto_secundario(),
         )
         return
 
@@ -199,6 +216,76 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             "Pega las direcciones una por línea y te la reordeno en la ruta más eficiente.",
             parse_mode="Markdown",
             reply_markup=menu_secundario(),
+        )
+        return
+
+    if query.data == "buscar_baremo":
+        user_data["esperando_baremo"] = True
+        user_data["esperando_presupuesto_item"] = False
+        await query.edit_message_text(
+            "🔎 *Escribe el concepto para buscar en los baremos:*",
+            parse_mode="Markdown",
+            reply_markup=menu_presupuesto_secundario(),
+        )
+        return
+
+    if query.data == "agregar_presupuesto":
+        user_data["esperando_presupuesto_item"] = True
+        user_data["esperando_baremo"] = False
+        await query.edit_message_text(
+            "➕ *Escribe el trabajo a incluir en el presupuesto:*",
+            parse_mode="Markdown",
+            reply_markup=menu_presupuesto_secundario(),
+        )
+        return
+
+    if query.data == "generar_presupuesto":
+        items = user_data.get("presupuesto_items", [])
+        if not items:
+            await query.edit_message_text(
+                "📭 *Todavía no has añadido ningún trabajo al presupuesto.*",
+                parse_mode="Markdown",
+                reply_markup=menu_presupuesto_secundario(),
+            )
+            return
+
+        presupuesto_total = {
+            "titulo": "Presupuesto total",
+            "categoria": "Varios trabajos",
+            "descripcion": "; ".join(item["descripcion"] for item in items),
+            "precio_min": round(sum(item["precio_min"] for item in items), 2),
+            "precio_recomendado": round(sum(item["precio_recomendado"] for item in items), 2),
+            "precio_max": round(sum(item["precio_max"] for item in items), 2),
+            "observaciones": f"Presupuesto acumulado con {len(items)} trabajos incluidos.",
+            "trabajos": [item["titulo"] for item in items],
+        }
+
+        resumen = (
+            "💰 *Presupuesto acumulado*\n\n"
+            f"📦 *Trabajos:* {len(items)}\n"
+            f"💵 *Total estimado:* {presupuesto_total['precio_recomendado']} €\n"
+            f"📉 *Mínimo:* {presupuesto_total['precio_min']} €\n"
+            f"📈 *Máximo:* {presupuesto_total['precio_max']} €"
+        )
+        await query.edit_message_text(resumen, parse_mode="Markdown")
+
+        pdf_path = PRESUPUESTOS_DIR / f"presupuesto_total_{query.from_user.id}_{int(query.id)}.pdf"
+        if generar_pdf_presupuesto(presupuesto_total, pdf_path):
+            with open(pdf_path, "rb") as doc:
+                await query.message.reply_document(
+                    document=doc,
+                    filename=pdf_path.name,
+                    caption="📄 *PDF del presupuesto acumulado*",
+                    parse_mode="Markdown",
+                )
+        return
+
+    if query.data == "limpiar_presupuesto":
+        user_data["presupuesto_items"] = []
+        await query.edit_message_text(
+            "🧹 *Lista de presupuesto vaciada.*",
+            parse_mode="Markdown",
+            reply_markup=menu_presupuesto_secundario(),
         )
         return
 
@@ -398,22 +485,77 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if user_data.get("esperando_baremo"):
+        baremo = buscar_baremo(texto)
+        user_data["esperando_baremo"] = False
+        if not baremo:
+            await update.message.reply_text(
+                "🔎 *No encontré coincidencias en los baremos.*\n\n"
+                "Prueba con otra descripción o usa añadir trabajo para estimarlo directamente.",
+                parse_mode="Markdown",
+                reply_markup=menu_presupuesto_secundario(),
+            )
+            return
+
+        precio = float(baremo.get("precio_recomendado", 0) or 0)
+        respuesta = (
+            "🔎 *Baremo encontrado*\n\n"
+            f"📌 *Nombre:* {baremo.get('nombre', 'Sin nombre')}\n"
+            f"📂 *Categoría:* {baremo.get('categoria', 'General')}\n"
+            f"💵 *Precio recomendado:* {precio:.2f} €\n"
+            f"📝 *Descripción:* {baremo.get('descripcion', 'Sin descripción')}"
+        )
+        await update.message.reply_text(
+            respuesta,
+            parse_mode="Markdown",
+            reply_markup=menu_presupuesto_secundario(),
+        )
+        return
+
+    if user_data.get("esperando_presupuesto_item"):
+        user_data["esperando_presupuesto_item"] = False
+        presupuesto = await estimar_presupuesto_basico(texto)
+        user_data.setdefault("presupuesto_items", []).append({
+            **presupuesto,
+            "descripcion": texto,
+            "titulo": presupuesto.get("titulo") or "Trabajo estimado",
+        })
+
+        total = sum(item["precio_recomendado"] for item in user_data["presupuesto_items"])
+        await update.message.reply_text(
+            "✅ *Trabajo añadido al presupuesto*\n\n"
+            f"📌 *Descripción:* {texto}\n"
+            f"💵 *Importe estimado:* {presupuesto['precio_recomendado']} €\n"
+            f"🧾 *Total acumulado:* {total:.2f} €",
+            parse_mode="Markdown",
+            reply_markup=menu_presupuesto_secundario(),
+        )
+        return
+
     if user_data.get("modo") == "presupuesto":
         presupuesto = await estimar_presupuesto_basico(texto)
+        user_data.setdefault("presupuesto_items", []).append({
+            **presupuesto,
+            "descripcion": texto,
+            "titulo": presupuesto.get("titulo") or "Trabajo estimado",
+        })
+
+        total = sum(item["precio_recomendado"] for item in user_data["presupuesto_items"])
         resumen = (
-            "💰 *Presupuesto estimado*\n\n"
+            "💰 *Presupuesto acumulado*\n\n"
             f"📌 *Título:* {presupuesto['titulo']}\n"
             f"📂 *Categoría:* {presupuesto['categoria']}\n"
             f"📝 *Descripción:* {presupuesto['descripcion']}\n"
             f"💵 *Mínimo:* {presupuesto['precio_min']} €\n"
             f"✅ *Recomendado:* {presupuesto['precio_recomendado']} €\n"
             f"💸 *Máximo:* {presupuesto['precio_max']} €\n\n"
+            f"🧾 *Total acumulado:* {total:.2f} €\n"
             f"📌 *Observaciones:* {presupuesto['observaciones']}"
         )
         await update.message.reply_text(
             resumen,
             parse_mode="Markdown",
-            reply_markup=menu_secundario(),
+            reply_markup=menu_presupuesto_secundario(),
         )
 
         pdf_path = PRESUPUESTOS_DIR / f"presupuesto_{update.message.from_user.id}_{int(update.message.date.timestamp())}.pdf"
@@ -535,7 +677,7 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             handle_menu_callback,
-            pattern="menu_|acomodar_ruta|cambiar_origen",
+            pattern="menu_|acomodar_ruta|cambiar_origen|buscar_baremo|agregar_presupuesto|generar_presupuesto|limpiar_presupuesto",
         )
     )
     application.add_handler(
