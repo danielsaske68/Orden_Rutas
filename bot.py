@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -326,14 +327,13 @@ def cargar_baremos():
         return []
 
 
-def buscar_baremo(texto):
+def buscar_baremos_similares(texto, limite=5):
     baremos = cargar_baremos()
     if not baremos:
-        return None
+        return []
 
     target = normalizar_texto(texto)
-    mejor = None
-    mejor_puntuacion = 0
+    resultados = []
 
     for baremo in baremos:
         haystack = " ".join([
@@ -354,57 +354,124 @@ def buscar_baremo(texto):
         if target and target in haystack_norm:
             score += 10
 
-        if score > mejor_puntuacion:
-            mejor_puntuacion = score
-            mejor = baremo
+        if score > 0:
+            resultados.append({
+                "baremo": baremo,
+                "score": score,
+                "nombre": str(baremo.get("nombre", "Sin nombre")).strip(),
+                "categoria": str(baremo.get("categoria", "General")).strip(),
+            })
 
-    if mejor is not None and mejor_puntuacion > 0:
-        return mejor
-    return None
+    resultados.sort(key=lambda item: item["score"], reverse=True)
+    return resultados[:limite]
+
+
+def buscar_baremo(texto):
+    candidatos = buscar_baremos_similares(texto, limite=1)
+    if not candidatos:
+        return None
+    return candidatos[0]["baremo"]
 
 
 def generar_pdf_presupuesto(data, filepath):
     try:
+        from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import getSampleStyleSheet
         from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-        from reportlab.lib import colors
 
-        doc = SimpleDocTemplate(str(filepath), pagesize=A4)
+        doc = SimpleDocTemplate(
+            str(filepath),
+            pagesize=A4,
+            leftMargin=36,
+            rightMargin=36,
+            topMargin=34,
+            bottomMargin=34,
+        )
         styles = getSampleStyleSheet()
         story = []
 
-        story.append(Paragraph(f"<b>{data['titulo']}</b>", styles['Title']))
-        story.append(Spacer(1, 18))
-        story.append(Paragraph(f"<b>Categoría:</b> {data['categoria']}", styles['BodyText']))
-        story.append(Paragraph(f"<b>Descripción:</b> {data['descripcion']}", styles['BodyText']))
-        story.append(Spacer(1, 12))
+        titulo = str(data.get("titulo", "Presupuesto")).strip() or "Presupuesto"
+        categoria = str(data.get("categoria", "General")).strip() or "General"
+        descripcion = str(data.get("descripcion", "")).strip() or "Sin descripción"
+        observaciones = str(data.get("observaciones", "")).strip() or "Sin observaciones"
+        trabajos = data.get("trabajos") or [titulo]
 
-        table_data = [
-            ["Rango min", "Recomendado", "Rango max"],
-            [f"{data['precio_min']:.2f} €", f"{data['precio_recomendado']:.2f} €", f"{data['precio_max']:.2f} €"],
+        story.append(Paragraph("<b>GESTOR PRO</b>", styles["Heading1"]))
+        story.append(Paragraph("Presupuesto técnico", styles["Heading2"]))
+        story.append(Spacer(1, 8))
+        story.append(Paragraph(f"Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles["BodyText"]))
+        story.append(Spacer(1, 18))
+
+        header_data = [
+            [Paragraph("<b>Concepto</b>", styles["BodyText"]), Paragraph(titulo, styles["BodyText"])],
+            [Paragraph("<b>Categoría</b>", styles["BodyText"]), Paragraph(categoria, styles["BodyText"])],
+            [Paragraph("<b>Descripción</b>", styles["BodyText"]), Paragraph(descripcion[:220], styles["BodyText"])],
         ]
-        table = Table(table_data, colWidths=[150, 150, 150])
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3b5f")),
+        header_table = Table(header_data, colWidths=[140, 360])
+        header_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f3f7fb")),
+            ("GRID", (0, 0), (-1, -1), 1, colors.HexColor("#d0d9e5")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.append(header_table)
+        story.append(Spacer(1, 18))
+
+        lineas = [["Concepto", "Mínimo", "Recomendado", "Máximo"]]
+        for idx, trabajo in enumerate(trabajos[:6], 1):
+            nombre = str(trabajo).strip() or f"Trabajo {idx}"
+            if len(nombre) > 48:
+                nombre = nombre[:45] + "..."
+            lineas.append([
+                nombre,
+                f"{float(data.get('precio_min', 0) or 0) / max(len(trabajos or [1]), 1):.2f} €",
+                f"{float(data.get('precio_recomendado', 0) or 0) / max(len(trabajos or [1]), 1):.2f} €",
+                f"{float(data.get('precio_max', 0) or 0) / max(len(trabajos or [1]), 1):.2f} €",
+            ])
+
+        lineas.append([
+            "TOTAL",
+            f"{float(data.get('precio_min', 0) or 0):.2f} €",
+            f"{float(data.get('precio_recomendado', 0) or 0):.2f} €",
+            f"{float(data.get('precio_max', 0) or 0):.2f} €",
+        ])
+
+        tabla = Table(lineas, colWidths=[200, 90, 110, 100])
+        tabla.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f4d7a")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-            ("GRID", (0, 0), (-1, -1), 1, colors.grey),
+            ("GRID", (0, 0), (-1, -1), 1, colors.HexColor("#b0bec9")),
             ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f8fafd")]),
+            ("BACKGROUND", (-4, -1), (-1, -1), colors.HexColor("#dfeaf7")),
+            ("FONTNAME", (-4, -1), (-1, -1), "Helvetica-Bold"),
+            ("TEXTCOLOR", (-4, -1), (-1, -1), colors.HexColor("#16314d")),
         ]))
-        story.append(table)
+        story.append(tabla)
         story.append(Spacer(1, 18))
-        story.append(Paragraph(f"<b>Observaciones:</b> {data['observaciones']}", styles['BodyText']))
 
-        for idx, trabajo in enumerate(data.get('trabajos', [])[:5], 1):
-            story.append(Paragraph(f"{idx}. {trabajo}", styles['BodyText']))
+        story.append(Paragraph("<b>Observaciones</b>", styles["Heading2"]))
+        story.append(Paragraph(observaciones, styles["BodyText"]))
+        story.append(Spacer(1, 18))
+
+        if trabajos and isinstance(trabajos, list):
+            story.append(Paragraph("<b>Trabajos incluidos</b>", styles["Heading2"]))
+            for idx, trabajo in enumerate(trabajos[:8], 1):
+                story.append(Paragraph(f"{idx}. {str(trabajo).strip()}", styles["BodyText"]))
+
+        story.append(Spacer(1, 20))
+        story.append(Paragraph("Documento generado por GESTOR PRO Telegram", styles["Italic"]))
 
         doc.build(story)
         return True
     except Exception as exc:
-        logging.warning("No se pudo generar el PDF: %s", exc)
+        logging.warning("No se pudo generar el PDF profesional: %s", exc)
         return False
 
 
@@ -486,9 +553,39 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if user_data.get("esperando_baremo"):
-        baremo = buscar_baremo(texto)
-        user_data["esperando_baremo"] = False
-        if not baremo:
+        if texto.lower() in {"ia", "usar ia", "ia opcional", "usar la ia"}:
+            user_data["esperando_baremo"] = False
+            user_data["baremo_candidatos"] = []
+            await update.message.reply_text(
+                "🧠 *IA como apoyo.*\n\n"
+                "La base del presupuesto sigue siendo el baremo local. La IA puede ayudarte a decidir o ajustar si hay varios casos parecidos.",
+                parse_mode="Markdown",
+                reply_markup=menu_presupuesto_secundario(),
+            )
+            return
+
+        if texto.isdigit() and user_data.get("baremo_candidatos"):
+            idx = int(texto) - 1
+            if 0 <= idx < len(user_data["baremo_candidatos"]):
+                baremo = user_data["baremo_candidatos"][idx]
+                user_data["esperando_baremo"] = False
+                user_data["baremo_candidatos"] = []
+                precio = float(baremo.get("precio_recomendado", 0) or 0)
+                await update.message.reply_text(
+                    "✅ *Baremo seleccionado*\n\n"
+                    f"📌 *Nombre:* {baremo.get('nombre', 'Sin nombre')}\n"
+                    f"📂 *Categoría:* {baremo.get('categoria', 'General')}\n"
+                    f"💵 *Precio recomendado:* {precio:.2f} €\n"
+                    f"📝 *Alias:* {', '.join(str(x) for x in (baremo.get('alias', []) or [])[:5]) or 'Sin alias'}",
+                    parse_mode="Markdown",
+                    reply_markup=menu_presupuesto_secundario(),
+                )
+                return
+
+        candidatos = buscar_baremos_similares(texto, limite=5)
+        if not candidatos:
+            user_data["esperando_baremo"] = False
+            user_data["baremo_candidatos"] = []
             await update.message.reply_text(
                 "🔎 *No encontré coincidencias en los baremos.*\n\n"
                 "Prueba con otra descripción o usa añadir trabajo para estimarlo directamente.",
@@ -497,16 +594,31 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        precio = float(baremo.get("precio_recomendado", 0) or 0)
-        respuesta = (
-            "🔎 *Baremo encontrado*\n\n"
-            f"📌 *Nombre:* {baremo.get('nombre', 'Sin nombre')}\n"
-            f"📂 *Categoría:* {baremo.get('categoria', 'General')}\n"
-            f"💵 *Precio recomendado:* {precio:.2f} €\n"
-            f"📝 *Descripción:* {baremo.get('descripcion', 'Sin descripción')}"
+        if len(candidatos) == 1:
+            baremo = candidatos[0]["baremo"]
+            user_data["esperando_baremo"] = False
+            user_data["baremo_candidatos"] = []
+            precio = float(baremo.get("precio_recomendado", 0) or 0)
+            await update.message.reply_text(
+                "🔎 *Baremo encontrado*\n\n"
+                f"📌 *Nombre:* {baremo.get('nombre', 'Sin nombre')}\n"
+                f"📂 *Categoría:* {baremo.get('categoria', 'General')}\n"
+                f"💵 *Precio recomendado:* {precio:.2f} €\n"
+                f"📝 *Descripción:* {baremo.get('descripcion', 'Sin descripción')}",
+                parse_mode="Markdown",
+                reply_markup=menu_presupuesto_secundario(),
+            )
+            return
+
+        user_data["baremo_candidatos"] = [item["baremo"] for item in candidatos]
+        lista = "\n".join(
+            f"{idx}. {item['nombre']} ({item['categoria']}) - score {item['score']}"
+            for idx, item in enumerate(candidatos, 1)
         )
         await update.message.reply_text(
-            respuesta,
+            "🔎 *He encontrado varias coincidencias en el archivo local.*\n\n"
+            f"{lista}\n\n"
+            "Escribe el número que quieras usar, o escribe *IA* si prefieres que la IA te ayude a decidir.",
             parse_mode="Markdown",
             reply_markup=menu_presupuesto_secundario(),
         )
