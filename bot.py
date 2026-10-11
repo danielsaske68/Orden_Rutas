@@ -141,7 +141,11 @@ def menu_presupuesto_secundario():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔎 Buscar baremo", callback_data="buscar_baremo"),
+            InlineKeyboardButton("🧠 IA", callback_data="ia_presupuesto"),
+        ],
+        [
             InlineKeyboardButton("➕ Añadir trabajo", callback_data="agregar_presupuesto"),
+            InlineKeyboardButton("✏ Editar precio", callback_data="editar_precio_baremo"),
         ],
         [
             InlineKeyboardButton("📄 Generar PDF", callback_data="generar_presupuesto"),
@@ -223,8 +227,23 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if query.data == "buscar_baremo":
         user_data["esperando_baremo"] = True
         user_data["esperando_presupuesto_item"] = False
+        user_data["esperando_ia"] = False
         await query.edit_message_text(
-            "🔎 *Escribe el concepto para buscar en los baremos:*",
+            "🔎 *Escribe el concepto para buscar en los baremos del archivo local:*\n\n"
+            "Si hay varios parecidos, te los muestro y eliges uno.\n"
+            "La IA es otra opción aparte, no remplaza al baremo local.",
+            parse_mode="Markdown",
+            reply_markup=menu_presupuesto_secundario(),
+        )
+        return
+
+    if query.data == "ia_presupuesto":
+        user_data["esperando_baremo"] = False
+        user_data["esperando_presupuesto_item"] = False
+        user_data["esperando_ia"] = True
+        await query.edit_message_text(
+            "🧠 *Asistente IA activado*\n\n"
+            "Escribe el trabajo y la IA lo valorará como apoyo, pero la fuente real sigue siendo el archivo de baremos local.",
             parse_mode="Markdown",
             reply_markup=menu_presupuesto_secundario(),
         )
@@ -233,8 +252,23 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if query.data == "agregar_presupuesto":
         user_data["esperando_presupuesto_item"] = True
         user_data["esperando_baremo"] = False
+        user_data["esperando_ia"] = False
         await query.edit_message_text(
             "➕ *Escribe el trabajo a incluir en el presupuesto:*",
+            parse_mode="Markdown",
+            reply_markup=menu_presupuesto_secundario(),
+        )
+        return
+
+    if query.data == "editar_precio_baremo":
+        user_data["esperando_editar_baremo"] = True
+        user_data["esperando_baremo"] = False
+        user_data["esperando_presupuesto_item"] = False
+        await query.edit_message_text(
+            "✏️ *Editar precio de baremo*\n\n"
+            "Escribe primero el número del baremo que quieres editar y luego el nuevo precio en formato: \n"
+            "`editar 3 85 110 135`\n\n"
+            "Formato: número | precio_min | precio_recomendado | precio_max",
             parse_mode="Markdown",
             reply_markup=menu_presupuesto_secundario(),
         )
@@ -570,12 +604,18 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 baremo = user_data["baremo_candidatos"][idx]
                 user_data["esperando_baremo"] = False
                 user_data["baremo_candidatos"] = []
-                precio = float(baremo.get("precio_recomendado", 0) or 0)
+                precio_legal = float(baremo.get("precio_legal", baremo.get("precio_recomendado", 0) or 0))
+                precio_min = float(baremo.get("precio_min", precio_legal) or precio_legal)
+                precio_max = float(baremo.get("precio_max", precio_legal) or precio_legal)
+                precio_recomendado = float(baremo.get("precio_recomendado", precio_legal) or precio_legal)
                 await update.message.reply_text(
                     "✅ *Baremo seleccionado*\n\n"
                     f"📌 *Nombre:* {baremo.get('nombre', 'Sin nombre')}\n"
                     f"📂 *Categoría:* {baremo.get('categoria', 'General')}\n"
-                    f"💵 *Precio recomendado:* {precio:.2f} €\n"
+                    f"💰 *Precio legal/base:* {precio_legal:.2f} €\n"
+                    f"💵 *Precio recomendado:* {precio_recomendado:.2f} €\n"
+                    f"📉 *Mínimo:* {precio_min:.2f} €\n"
+                    f"📈 *Máximo:* {precio_max:.2f} €\n"
                     f"📝 *Alias:* {', '.join(str(x) for x in (baremo.get('alias', []) or [])[:5]) or 'Sin alias'}",
                     parse_mode="Markdown",
                     reply_markup=menu_presupuesto_secundario(),
@@ -598,13 +638,19 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             baremo = candidatos[0]["baremo"]
             user_data["esperando_baremo"] = False
             user_data["baremo_candidatos"] = []
-            precio = float(baremo.get("precio_recomendado", 0) or 0)
+            precio_legal = float(baremo.get("precio_legal", baremo.get("precio_recomendado", 0) or 0))
+            precio_min = float(baremo.get("precio_min", precio_legal) or precio_legal)
+            precio_max = float(baremo.get("precio_max", precio_legal) or precio_legal)
+            precio_recomendado = float(baremo.get("precio_recomendado", precio_legal) or precio_legal)
             await update.message.reply_text(
                 "🔎 *Baremo encontrado*\n\n"
                 f"📌 *Nombre:* {baremo.get('nombre', 'Sin nombre')}\n"
                 f"📂 *Categoría:* {baremo.get('categoria', 'General')}\n"
-                f"💵 *Precio recomendado:* {precio:.2f} €\n"
-                f"📝 *Descripción:* {baremo.get('descripcion', 'Sin descripción')}",
+                f"💰 *Precio legal/base:* {precio_legal:.2f} €\n"
+                f"💵 *Precio recomendado:* {precio_recomendado:.2f} €\n"
+                f"📉 *Mínimo:* {precio_min:.2f} €\n"
+                f"📈 *Máximo:* {precio_max:.2f} €\n"
+                f"📝 *Descripcion:* {baremo.get('descripcion', 'Sin descripción')}",
                 parse_mode="Markdown",
                 reply_markup=menu_presupuesto_secundario(),
             )
@@ -612,13 +658,64 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_data["baremo_candidatos"] = [item["baremo"] for item in candidatos]
         lista = "\n".join(
-            f"{idx}. {item['nombre']} ({item['categoria']}) - score {item['score']}"
+            f"{idx}. {item['nombre']} ({item['categoria']}) | rec {float(item['baremo'].get('precio_recomendado', item['baremo'].get('precio_legal', 0) or 0)):.2f} €"
             for idx, item in enumerate(candidatos, 1)
         )
         await update.message.reply_text(
             "🔎 *He encontrado varias coincidencias en el archivo local.*\n\n"
             f"{lista}\n\n"
-            "Escribe el número que quieras usar, o escribe *IA* si prefieres que la IA te ayude a decidir.",
+            "Escribe el número que quieras usar.\n"
+            "Si prefieres, escribe *IA* para usar la IA como apoyo aparte.",
+            parse_mode="Markdown",
+            reply_markup=menu_presupuesto_secundario(),
+        )
+        return
+
+    if user_data.get("esperando_ia"):
+        user_data["esperando_ia"] = False
+        await update.message.reply_text(
+            "🧠 *IA aparte activada*\n\n"
+            f"He recibido: {texto}\n\n"
+            "La IA puede ayudarte a valorar el caso, pero la base sigue siendo el archivo de baremos y luego el precio final debe revisarse con los datos reales del cliente.",
+            parse_mode="Markdown",
+            reply_markup=menu_presupuesto_secundario(),
+        )
+        return
+
+    if user_data.get("esperando_editar_baremo"):
+        if texto.lower().startswith("editar "):
+            partes = texto.split()
+            if len(partes) >= 5:
+                try:
+                    idx = int(partes[1]) - 1
+                    baremos = cargar_baremos()
+                    if 0 <= idx < len(baremos):
+                        baremo = baremos[idx]
+                        baremo["precio_min"] = float(partes[2])
+                        baremo["precio_recomendado"] = float(partes[3])
+                        baremo["precio_max"] = float(partes[4])
+                        baremo["precio_legal"] = float(partes[3])
+                        with open(GESTORPRO_DATA, "w", encoding="utf-8") as f:
+                            json.dump(baremos, f, ensure_ascii=False, indent=4)
+                        user_data["esperando_editar_baremo"] = False
+                        await update.message.reply_text(
+                            "✅ *Precio actualizado en el archivo local*\n\n"
+                            f"📌 *Nombre:* {baremo.get('nombre', 'Sin nombre')}\n"
+                            f"💰 *Precio legal:* {baremo['precio_legal']:.2f} €\n"
+                            f"💵 *Recomendado:* {baremo['precio_recomendado']:.2f} €\n"
+                            f"📉 *Mínimo:* {baremo['precio_min']:.2f} €\n"
+                            f"📈 *Máximo:* {baremo['precio_max']:.2f} €",
+                            parse_mode="Markdown",
+                            reply_markup=menu_presupuesto_secundario(),
+                        )
+                        return
+                except ValueError:
+                    pass
+        user_data["esperando_editar_baremo"] = False
+        await update.message.reply_text(
+            "✏️ *Formato incorrecto.*\n\n"
+            "Usa: `editar 3 85 110 135`\n"
+            "donde 3 es el número del baremo y luego min, recomendado, max.",
             parse_mode="Markdown",
             reply_markup=menu_presupuesto_secundario(),
         )
@@ -789,7 +886,7 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             handle_menu_callback,
-            pattern="menu_|acomodar_ruta|cambiar_origen|buscar_baremo|agregar_presupuesto|generar_presupuesto|limpiar_presupuesto",
+            pattern="menu_|acomodar_ruta|cambiar_origen|buscar_baremo|ia_presupuesto|agregar_presupuesto|editar_precio_baremo|generar_presupuesto|limpiar_presupuesto",
         )
     )
     application.add_handler(
