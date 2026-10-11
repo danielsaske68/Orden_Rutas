@@ -1,7 +1,11 @@
+import json
 import logging
 import os
-import urllib.parse
+import re
+import unicodedata
+from pathlib import Path
 
+import requests
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -30,6 +34,9 @@ logging.basicConfig(
 # Token del bot (variable d'entorn a Railway)
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DEFAULT_ORIGEN = "Carrer de Bernat Descoll, 63, 46026 València, España"
+GESTORPRO_DATA = Path(r"C:\Users\Admin\Desktop\GESTORPRO\data\baremos_v2.json")
+PRESUPUESTOS_DIR = Path(r"C:\Users\Admin\Desktop\gps\presupuestos")
+PRESUPUESTOS_DIR.mkdir(exist_ok=True)
 
 
 def ordenar_por_duracion(duraciones, cantidad):
@@ -114,18 +121,18 @@ def menu_principal():
             InlineKeyboardButton("🗺️ Rutas", callback_data="menu_rutas"),
             InlineKeyboardButton("💰 Presupuesto", callback_data="menu_presupuesto"),
         ],
-        [
-            InlineKeyboardButton("📍 Cambiar origen", callback_data="cambiar_origen")
-        ],
     ])
 
 
 def menu_secundario():
     return InlineKeyboardMarkup([
         [
+            InlineKeyboardButton("🧭 Acomodar ruta", callback_data="acomodar_ruta"),
+            InlineKeyboardButton("📍 Cambiar origen de arranque", callback_data="cambiar_origen"),
+        ],
+        [
             InlineKeyboardButton("🏠 Menú principal", callback_data="menu_inicio"),
-            InlineKeyboardButton("📍 Cambiar origen", callback_data="cambiar_origen"),
-        ]
+        ],
     ])
 
 
@@ -168,7 +175,7 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(
             "🗺️ *Modo rutas activado*\n\n"
             "Pega aquí las direcciones o servicios, una por línea, y te calcularé la ruta más eficiente.\n\n"
-            "También puedes usar /origen para cambiar el punto de salida.",
+            "Puedes cambiar el origen de arranque o volver a acomodar la ruta desde los botones de abajo.",
             parse_mode="Markdown",
             reply_markup=menu_secundario(),
         )
@@ -180,6 +187,16 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             "💰 *Modo presupuesto activado*\n\n"
             "Escribe la descripción del trabajo y te devolveré una estimación rápida.\n\n"
             "Ejemplo: desatasco wc urgente con acceso difícil",
+            parse_mode="Markdown",
+            reply_markup=menu_secundario(),
+        )
+        return
+
+    if query.data == "acomodar_ruta":
+        user_data["modo"] = "rutas"
+        await query.edit_message_text(
+            "🧭 *Acomodar ruta*\n\n"
+            "Pega las direcciones una por línea y te la reordeno en la ruta más eficiente.",
             parse_mode="Markdown",
             reply_markup=menu_secundario(),
         )
@@ -203,8 +220,139 @@ async def cambiar_origen_cmd(
     )
 
 
+def normalizar_texto(valor):
+    texto = unicodedata.normalize("NFKD", str(valor or ""))
+    texto = texto.encode("ascii", "ignore").decode("ascii")
+    texto = texto.lower().strip()
+    return re.sub(r"\s+", " ", texto)
+
+
+def cargar_baremos():
+    try:
+        if not GESTORPRO_DATA.exists():
+            return []
+        with open(GESTORPRO_DATA, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        logging.warning("No se pudieron cargar los baremos: %s", exc)
+        return []
+
+
+def buscar_baremo(texto):
+    baremos = cargar_baremos()
+    if not baremos:
+        return None
+
+    target = normalizar_texto(texto)
+    mejor = None
+    mejor_puntuacion = 0
+
+    for baremo in baremos:
+        haystack = " ".join([
+            str(baremo.get("nombre", "")),
+            str(baremo.get("categoria", "")),
+            " ".join(str(x) for x in baremo.get("alias", []) or []),
+            " ".join(str(x) for x in baremo.get("buscar", []) or []),
+        ])
+        haystack_norm = normalizar_texto(haystack)
+
+        score = 0
+        for palabra in re.findall(r"[a-zA-Z0-9]+", target):
+            if len(palabra) < 3:
+                continue
+            if palabra in haystack_norm:
+                score += 2
+
+        if target and target in haystack_norm:
+            score += 10
+
+        if score > mejor_puntuacion:
+            mejor_puntuacion = score
+            mejor = baremo
+
+    if mejor is not None and mejor_puntuacion > 0:
+        return mejor
+    return None
+
+
+def generar_pdf_presupuesto(data, filepath):
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from reportlab.lib import colors
+
+        doc = SimpleDocTemplate(str(filepath), pagesize=A4)
+        styles = getSampleStyleSheet()
+        story = []
+
+        story.append(Paragraph(f"<b>{data['titulo']}</b>", styles['Title']))
+        story.append(Spacer(1, 18))
+        story.append(Paragraph(f"<b>Categoría:</b> {data['categoria']}", styles['BodyText']))
+        story.append(Paragraph(f"<b>Descripción:</b> {data['descripcion']}", styles['BodyText']))
+        story.append(Spacer(1, 12))
+
+        table_data = [
+            ["Rango min", "Recomendado", "Rango max"],
+            [f"{data['precio_min']:.2f} €", f"{data['precio_recomendado']:.2f} €", f"{data['precio_max']:.2f} €"],
+        ]
+        table = Table(table_data, colWidths=[150, 150, 150])
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3b5f")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+            ("GRID", (0, 0), (-1, -1), 1, colors.grey),
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+        ]))
+        story.append(table)
+        story.append(Spacer(1, 18))
+        story.append(Paragraph(f"<b>Observaciones:</b> {data['observaciones']}", styles['BodyText']))
+
+        for idx, trabajo in enumerate(data.get('trabajos', [])[:5], 1):
+            story.append(Paragraph(f"{idx}. {trabajo}", styles['BodyText']))
+
+        doc.build(story)
+        return True
+    except Exception as exc:
+        logging.warning("No se pudo generar el PDF: %s", exc)
+        return False
+
+
 async def estimar_presupuesto_basico(texto):
-    t = texto.lower()
+    baremo = buscar_baremo(texto)
+    if baremo:
+        base = float(baremo.get("precio_recomendado", 0) or 0)
+        minimo = float(baremo.get("precio_min", base) or base)
+        maximo = float(baremo.get("precio_max", base) or base)
+        prioridad = 1.0
+        t = normalizar_texto(texto)
+        if any(k in t for k in ["urgente", "hoy mismo", "fin de semana", "noche"]):
+            prioridad *= 1.2
+        if any(k in t for k in ["acceso dificil", "acceso difícil", "muebles", "pared", "falso techo"]):
+            prioridad *= 1.15
+        if any(k in t for k in ["material", "pieza", "válvula", "brida", "sifon", "racor"]):
+            prioridad *= 1.1
+
+        data = {
+            "titulo": str(baremo.get("nombre", "Presupuesto estimado")).strip() or "Presupuesto estimado",
+            "categoria": str(baremo.get("categoria", "General")).strip() or "General",
+            "descripcion": texto,
+            "precio_min": round(max(0, minimo * prioridad), 2),
+            "precio_recomendado": round(max(0, base * prioridad), 2),
+            "precio_max": round(max(0, maximo * prioridad), 2),
+            "observaciones": "Estimación basada en el baremo del gestor y ajustada por urgencia, accesos y materiales extra.",
+            "trabajos": [
+                str(baremo.get("nombre", "Trabajo técnico")),
+                "Comprobación final del servicio",
+                "Prueba de funcionamiento",
+            ],
+        }
+        return data
+
+    t = normalizar_texto(texto)
     base = 90.0
 
     if any(k in t for k in ["wc", "vater", "inodoro", "desatasco", "atasco"]):
@@ -222,10 +370,17 @@ async def estimar_presupuesto_basico(texto):
 
     return {
         "titulo": "Presupuesto estimado",
+        "categoria": "General",
         "descripcion": texto,
         "precio_min": round(base * 0.9, 2),
         "precio_recomendado": round(base, 2),
         "precio_max": round(base * 1.25, 2),
+        "observaciones": "Estimación rápida del bot. Si quieres, se puede ajustar con el baremo del gestor o IA más avanzada.",
+        "trabajos": [
+            "Diagnóstico del problema",
+            "Intervención técnica",
+            "Prueba final",
+        ],
     }
 
 
@@ -245,15 +400,31 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_data.get("modo") == "presupuesto":
         presupuesto = await estimar_presupuesto_basico(texto)
-        await update.message.reply_text(
+        resumen = (
             "💰 *Presupuesto estimado*\n\n"
+            f"📌 *Título:* {presupuesto['titulo']}\n"
+            f"📂 *Categoría:* {presupuesto['categoria']}\n"
             f"📝 *Descripción:* {presupuesto['descripcion']}\n"
             f"💵 *Mínimo:* {presupuesto['precio_min']} €\n"
             f"✅ *Recomendado:* {presupuesto['precio_recomendado']} €\n"
-            f"💸 *Máximo:* {presupuesto['precio_max']} €",
+            f"💸 *Máximo:* {presupuesto['precio_max']} €\n\n"
+            f"📌 *Observaciones:* {presupuesto['observaciones']}"
+        )
+        await update.message.reply_text(
+            resumen,
             parse_mode="Markdown",
             reply_markup=menu_secundario(),
         )
+
+        pdf_path = PRESUPUESTOS_DIR / f"presupuesto_{update.message.from_user.id}_{int(update.message.date.timestamp())}.pdf"
+        if generar_pdf_presupuesto(presupuesto, pdf_path):
+            with open(pdf_path, "rb") as doc:
+                await update.message.reply_document(
+                    document=doc,
+                    filename=pdf_path.name,
+                    caption="📄 *Presupuesto generado en PDF*",
+                    parse_mode="Markdown",
+                )
         return
 
     lineas = [l.strip() for l in texto.splitlines() if l.strip()]
@@ -362,7 +533,10 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("origen", cambiar_origen_cmd))
     application.add_handler(
-        CallbackQueryHandler(handle_menu_callback, pattern="menu_|cambiar_origen")
+        CallbackQueryHandler(
+            handle_menu_callback,
+            pattern="menu_|acomodar_ruta|cambiar_origen",
+        )
     )
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje)
