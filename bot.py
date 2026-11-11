@@ -2,12 +2,13 @@ import logging
 import os
 import re
 from datetime import datetime
-from pathlib import Path
+from urllib.parse import quote_plus
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -91,7 +92,7 @@ def generar_gpx(puntos_ordenados, origen_texto):
     gpx = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<gpx version="1.1" creator="RutasBot"'
-        ' xmlns="http://www.topografix.com/GPX/1/1">',
+        ' xmlns="[http://www.topografix.com/GPX/1/1](http://www.topografix.com/GPX/1/1)">',
         "<rte>",
         f"<name>Ruta de Reparto desde {origen_texto}</name>",
     ]
@@ -106,6 +107,12 @@ def generar_gpx(puntos_ordenados, origen_texto):
     return "\n".join(gpx)
 
 
+def menu_principal(origen):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📍 Cambiar punto de salida", callback_data="btn_cambiar_origen")]
+    ])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     if "origen" not in user_data:
@@ -114,14 +121,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🚚 *Bot Optimizador de Rutas*\n\n"
         f"📍 *Punto de Salida Actual:* `{user_data['origen']}`\n\n"
-        "👉 Envía /origen para cambiar el punto de salida o simplemente *pega tus direcciones* (con formato ID|Direccion) para ordenarlas."
+        "👉 Puedes cambiar el origen con el botón de abajo o simplemente **pegar aquí tus direcciones** (con formato ID|Direccion) para ordenarlas al instante."
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    if update.message:
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=menu_principal(user_data["origen"]))
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=menu_principal(user_data["origen"]))
 
 
-async def cambiar_origen_cmd(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_data = context.user_data
+
+    if query.data == "btn_cambiar_origen":
+        user_data["esperando_origen"] = True
+        await query.message.reply_text(
+            "✏️ *Escribe la nueva dirección de salida:*", parse_mode="Markdown"
+        )
+
+
+async def cambiar_origen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["esperando_origen"] = True
     await update.message.reply_text(
         "✏️ *Escribe la nueva dirección de salida:*", parse_mode="Markdown"
@@ -138,6 +158,7 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ *Punto de salida actualizado a:*\n`{texto}`",
             parse_mode="Markdown",
+            reply_markup=menu_principal(texto),
         )
         return
 
@@ -202,12 +223,26 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i in range(len(orden_idx))
     )
 
+    # Construir enlace de Google Maps con múltiples paradas (Waypoints)
+    # Formato: [https://www.google.com/maps/dir/?api=1&origin=...&destination=...&waypoints=](https://www.google.com/maps/dir/?api=1&origin=...&destination=...&waypoints=)...
+    origin_encoded = quote_plus(origen)
+    if len(ruta_ordenada) == 1:
+        dest_encoded = quote_plus(f"{ruta_ordenada[0]['calle']}, {ruta_ordenada[0]['municipio']}")
+        gmaps_url = f"[https://www.google.com/maps/dir/?api=1&origin=](https://www.google.com/maps/dir/?api=1&origin=){origin_encoded}&destination={dest_encoded}"
+    else:
+        # Destino final es el último punto
+        dest_encoded = quote_plus(f"{ruta_ordenada[-1]['calle']}, {ruta_ordenada[-1]['municipio']}")
+        # Puntos intermedios (waypoints) son todos menos el último
+        waypoints_list = [f"{p['lat']},{p['lon']}" for p in ruta_ordenada[:-1]]
+        waypoints_str = "|".join(waypoints_list)
+        gmaps_url = f"[https://www.google.com/maps/dir/?api=1&origin=](https://www.google.com/maps/dir/?api=1&origin=){origin_encoded}&destination={dest_encoded}&waypoints={waypoints_str}"
+
     resumen = (
         "📍 *RUTA ÓPTIMA CALCULADA*\n"
         f"🏁 *Salida:* `{origen}`\n"
         f"📦 *Avisos:* {len(ruta_ordenada)} | 🚗 *Km:* {total_m/1000:.1f} km | ⏱️"
         f" *Tiempo:* {int(total_s//60)} min\n\n"
-        "📋 *Lista ordenada para importar (copia el siguiente bloque):*\n```text\n"
+        "📋 *Lista ordenada (mantén presionado para copiar):*\n```text\n"
     )
 
     for p in ruta_ordenada:
@@ -215,21 +250,26 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     resumen += "```"
 
+    # Botones interactivos debajo del mensaje: Google Maps + Volver al inicio
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗺️ Abrir ruta completa en Google Maps", url=gmaps_url)],
+        [InlineKeyboardButton("🏠 Menú / Cambiar origen", callback_data="btn_cambiar_origen")]
+    ])
+
     gpx_content = generar_gpx(ruta_ordenada, origen)
     with open("ruta.gpx", "w", encoding="utf-8") as f:
         f.write(gpx_content)
 
     await msg_espera.delete()
 
-    await update.message.reply_text(resumen, parse_mode="Markdown")
+    await update.message.reply_text(resumen, parse_mode="Markdown", reply_markup=keyboard)
 
     with open("ruta.gpx", "rb") as doc:
         await update.message.reply_document(
             document=doc,
             filename="ruta_reparto.gpx",
             caption=(
-                "📱 *Abre este archivo GPX en OsmAnd u Organic Maps para navegar"
-                " sin límites de Google.*"
+                "📱 *Archivo GPX generado para OsmAnd / Organic Maps.*"
             ),
         )
 
@@ -245,11 +285,12 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("origen", cambiar_origen_cmd))
+    application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje)
     )
 
-    logging.info("Bot de rutas simplificado iniciado en Telegram.")
+    logging.info("Bot de rutas simplificado con botones iniciado en Telegram.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
