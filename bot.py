@@ -3,11 +3,13 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -106,17 +108,53 @@ def generar_gpx(puntos_ordenados, origen_texto):
     return "\n".join(gpx)
 
 
+def menu_principal(origen_actual):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📍 Cambiar punto de salida", callback_data="cambiar_origen"),
+        ],
+    ])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     if "origen" not in user_data:
         user_data["origen"] = DEFAULT_ORIGEN
+    user_data["esperando_origen"] = False
 
     msg = (
-        "🚚 *Bot Optimizador de Rutas*\n\n"
-        f"📍 *Punto de Salida Actual:* `{user_data['origen']}`\n\n"
-        "👉 Envía /origen para cambiar el punto de salida o simplemente *pega tus direcciones* (con formato ID|Direccion) para ordenarlas."
+        "🚚 *Optimizador de Rutas Profesional*\n\n"
+        f"📍 *Punto de Salida Actual:*\n`{user_data['origen']}`\n\n"
+        "👉 *¿Cómo usarlo?*\n"
+        "Simplemente **pega tus direcciones o avisos** (con formato `ID|Dirección`, uno por línea) y te calcularé la ruta más eficiente al instante."
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    if update.message:
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=menu_principal(user_data['origen']))
+    elif update.callback_query:
+        await update.callback_query.message.edit_text(msg, parse_mode="Markdown", reply_markup=menu_principal(user_data['origen']))
+
+
+async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_data = context.user_data
+
+    if query.data == "cambiar_origen":
+        user_data["esperando_origen"] = True
+        await query.message.edit_text(
+            "📍 *Cambiar Punto de Salida*\n\n"
+            "Escribe la nueva dirección completa de arranque:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar_origen")]
+            ]),
+        )
+        return
+
+    if query.data == "cancelar_origen":
+        user_data["esperando_origen"] = False
+        await start(update, context)
+        return
 
 
 async def cambiar_origen_cmd(
@@ -124,7 +162,11 @@ async def cambiar_origen_cmd(
 ):
     context.user_data["esperando_origen"] = True
     await update.message.reply_text(
-        "✏️ *Escribe la nueva dirección de salida:*", parse_mode="Markdown"
+        "✏️ *Escribe la nueva dirección completa de salida:*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar_origen")]
+        ])
     )
 
 
@@ -136,8 +178,10 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data["origen"] = texto
         user_data["esperando_origen"] = False
         await update.message.reply_text(
-            f"✅ *Punto de salida actualizado a:*\n`{texto}`",
+            f"✅ *Punto de salida actualizado con éxito a:*\n`{texto}`\n\n"
+            "Ya puedes pegar tu lista de avisos para calcular la ruta.",
             parse_mode="Markdown",
+            reply_markup=menu_principal(texto),
         )
         return
 
@@ -202,6 +246,19 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i in range(len(orden_idx))
     )
 
+    # Construir enlace directo a Google Maps con origen, waypoints y destino ordenados
+    origin_encoded = quote_plus(origen)
+    direcciones_mapa = [f"{p.get('calle', '')}, {p.get('municipio', '')}" for p in ruta_ordenada]
+    
+    if len(direcciones_mapa) == 1:
+        dest_encoded = quote_plus(direcciones_mapa[0])
+        gmaps_url = f"https://www.google.com/maps/dir/?api=1&origin={origin_encoded}&destination={dest_encoded}"
+    else:
+        dest_encoded = quote_plus(direcciones_mapa[-1])
+        waypoints_list = [quote_plus(d) for d in direcciones_mapa[:-1]]
+        waypoints_str = "|".join(waypoints_list)
+        gmaps_url = f"https://www.google.com/maps/dir/?api=1&origin={origin_encoded}&destination={dest_encoded}&waypoints={waypoints_str}"
+
     resumen = (
         "📍 *RUTA ÓPTIMA CALCULADA*\n"
         f"🏁 *Salida:* `{origen}`\n"
@@ -221,7 +278,13 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await msg_espera.delete()
 
-    await update.message.reply_text(resumen, parse_mode="Markdown")
+    # Botón directo para abrir en Google Maps con la ruta ya optimizada
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗺️ Abrir ruta completa en Google Maps", url=gmaps_url)],
+        [InlineKeyboardButton("🏠 Menú / Cambiar Origen", callback_data="cancelar_origen")]
+    ])
+
+    await update.message.reply_text(resumen, parse_mode="Markdown", reply_markup=reply_markup)
 
     with open("ruta.gpx", "rb") as doc:
         await update.message.reply_document(
@@ -246,10 +309,16 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("origen", cambiar_origen_cmd))
     application.add_handler(
+        CallbackQueryHandler(
+            handle_menu_callback,
+            pattern="^cambiar_origen$|^cancelar_origen$",
+        )
+    )
+    application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje)
     )
 
-    logging.info("Bot de rutas simplificado iniciado en Telegram.")
+    logging.info("Bot de rutas simplificado y mejorado iniciado en Telegram.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
